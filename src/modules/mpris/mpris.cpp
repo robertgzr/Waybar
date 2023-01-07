@@ -269,7 +269,10 @@ auto Mpris::getPlayerInfo() -> std::optional<PlayerInfo> {
     auto len_h = std::chrono::duration_cast<std::chrono::hours>(len);
     auto len_m = std::chrono::duration_cast<std::chrono::minutes>(len - len_h);
     auto len_s = std::chrono::duration_cast<std::chrono::seconds>(len - len_m);
-    info.length = fmt::format("{:02}:{:02}:{:02}", len_h.count(), len_m.count(), len_s.count());
+    if (len_h.count() > 0)
+      info.length = fmt::format("{:02}:{:02}:{:02}", len_h.count(), len_m.count(), len_s.count());
+    else
+      info.length = fmt::format("{:02}:{:02}", len_m.count(), len_s.count());
     g_free(length_);
   }
   if (error) goto errorexit;
