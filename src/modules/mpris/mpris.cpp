@@ -64,43 +64,6 @@ Mpris::Mpris(const std::string& id, const Json::Value& config)
   g_object_connect(manager, "signal::name-appeared", G_CALLBACK(onPlayerNameAppeared), this, NULL);
   g_object_connect(manager, "signal::name-vanished", G_CALLBACK(onPlayerNameVanished), this, NULL);
 
-  if (player_ == "playerctld") {
-    // use playerctld proxy
-    PlayerctlPlayerName name = {
-        .instance = (gchar*)player_.c_str(),
-        .source = PLAYERCTL_SOURCE_DBUS_SESSION,
-    };
-    player = playerctl_player_new_from_name(&name, &error);
-
-  } else {
-    GList* players = playerctl_list_players(&error);
-    if (error) {
-      auto e = fmt::format("unable to list players: {}", error->message);
-      g_error_free(error);
-      throw std::runtime_error(e);
-    }
-
-    for (auto p = players; p != NULL; p = p->next) {
-      auto pn = static_cast<PlayerctlPlayerName*>(p->data);
-      if (strcmp(pn->name, player_.c_str()) == 0) {
-        player = playerctl_player_new_from_name(pn, &error);
-        break;
-      }
-    }
-  }
-
-  if (error) {
-    throw std::runtime_error(
-        fmt::format("unable to connect to player {}: {}", player_, error->message));
-  }
-
-  if (player) {
-    g_object_connect(player, "signal::play", G_CALLBACK(onPlayerPlay), this, "signal::pause",
-                     G_CALLBACK(onPlayerPause), this, "signal::stop", G_CALLBACK(onPlayerStop),
-                     this, "signal::stop", G_CALLBACK(onPlayerStop), this, "signal::metadata",
-                     G_CALLBACK(onPlayerMetadata), this, NULL);
-  }
-
   // allow setting an interval count that triggers periodic refreshes
   if (interval_.count() > 0) {
     thread_ = [this] {
@@ -135,18 +98,13 @@ auto Mpris::onPlayerNameAppeared(PlayerctlPlayerManager* manager, PlayerctlPlaye
   if (!mpris) return;
 
   spdlog::debug("mpris: name-appeared callback: {}", player_name->name);
-
-  if (std::string(player_name->name) != mpris->player_) {
-    return;
-  }
-
-  GError* error = nullptr;
-  mpris->player = playerctl_player_new_from_name(player_name, &error);
-  g_object_connect(mpris->player, "signal::play", G_CALLBACK(onPlayerPlay), mpris, "signal::pause",
-                   G_CALLBACK(onPlayerPause), mpris, "signal::stop", G_CALLBACK(onPlayerStop),
-                   mpris, "signal::stop", G_CALLBACK(onPlayerStop), mpris, "signal::metadata",
-                   G_CALLBACK(onPlayerMetadata), mpris, NULL);
-
+  // NOTE: this sleep helps with players what register on the bus when they
+  // don't have complete metadata yet and also omit sending a metadata signal
+  // when they finally do. e.g. the official spotify client
+  // without this delay we never get all metadata due to property caching on the
+  // libplayerctl side.
+  sleep(1);
+  mpris->player = nullptr;
   mpris->dp.emit();
 }
 
@@ -155,12 +113,9 @@ auto Mpris::onPlayerNameVanished(PlayerctlPlayerManager* manager, PlayerctlPlaye
   Mpris* mpris = static_cast<Mpris*>(data);
   if (!mpris) return;
 
-  spdlog::debug("mpris: player-vanished callback: {}", player_name->name);
-
-  if (std::string(player_name->name) == mpris->player_) {
-    mpris->player = nullptr;
-    mpris->dp.emit();
-  }
+  spdlog::debug("mpris: name-vanished callback: {}", player_name->name);
+  mpris->player = nullptr;
+  mpris->dp.emit();
 }
 
 auto Mpris::onPlayerPlay(PlayerctlPlayer* player, gpointer data) -> void {
@@ -168,7 +123,6 @@ auto Mpris::onPlayerPlay(PlayerctlPlayer* player, gpointer data) -> void {
   if (!mpris) return;
 
   spdlog::debug("mpris: player-play callback");
-  // update widget
   mpris->dp.emit();
 }
 
@@ -177,7 +131,6 @@ auto Mpris::onPlayerPause(PlayerctlPlayer* player, gpointer data) -> void {
   if (!mpris) return;
 
   spdlog::debug("mpris: player-pause callback");
-  // update widget
   mpris->dp.emit();
 }
 
@@ -186,10 +139,7 @@ auto Mpris::onPlayerStop(PlayerctlPlayer* player, gpointer data) -> void {
   if (!mpris) return;
 
   spdlog::debug("mpris: player-stop callback");
-
-  // hide widget
   mpris->event_box_.set_visible(false);
-  // update widget
   mpris->dp.emit();
 }
 
@@ -198,12 +148,12 @@ auto Mpris::onPlayerMetadata(PlayerctlPlayer* player, GVariant* metadata, gpoint
   if (!mpris) return;
 
   spdlog::debug("mpris: player-metadata callback");
-  // update widget
   mpris->dp.emit();
 }
 
 auto Mpris::getPlayerInfo() -> std::optional<PlayerInfo> {
   if (!player) {
+    spdlog::debug("mpris[{}]: no player", player_);
     return std::nullopt;
   }
 
@@ -330,6 +280,23 @@ bool Mpris::handleToggle(GdkEventButton* const& e) {
 }
 
 auto Mpris::update() -> void {
+  if (!player) {
+    GError* error = nullptr;
+    PlayerctlPlayerName name = {
+        .instance = (gchar*)player_.c_str(),
+        .source = PLAYERCTL_SOURCE_DBUS_SESSION,
+    };
+    player = playerctl_player_new_from_name(&name, &error);
+    if (error) {
+      throw std::runtime_error(
+          fmt::format("unable to connect to player {}: {}", player_, error->message));
+    }
+    g_object_connect(player, "signal::play", G_CALLBACK(onPlayerPlay), this,
+                      "signal::pause", G_CALLBACK(onPlayerPause), this, "signal::stop",
+                      G_CALLBACK(onPlayerStop), this, "signal::stop", G_CALLBACK(onPlayerStop),
+                      this, "signal::metadata", G_CALLBACK(onPlayerMetadata), this, NULL);
+  }
+
   auto opt = getPlayerInfo();
   if (!opt) {
     event_box_.set_visible(false);
@@ -339,7 +306,9 @@ auto Mpris::update() -> void {
   auto info = *opt;
 
   if (info.status == PLAYERCTL_PLAYBACK_STATUS_STOPPED) {
-    spdlog::debug("mpris[{}]: player stopped, skipping update", info.name);
+    spdlog::debug("mpris[{}]: player stopped", info.name);
+    event_box_.set_visible(false);
+    AModule::update();
     return;
   }
 
