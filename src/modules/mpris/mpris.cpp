@@ -243,37 +243,44 @@ auto Mpris::getPlayerInfo() -> std::optional<PlayerInfo> {
   };
 
   if (auto artist_ = playerctl_player_get_artist(player, &error)) {
-    spdlog::debug("mpris[{}]: artist = {}", info.name, artist_);
-    info.artist = Glib::Markup::escape_text(artist_);
+    if (std::string(artist_).length() > 0) {
+      info.artist = Glib::Markup::escape_text(artist_);
+      spdlog::debug("mpris[{}]: artist = {}", info.name, artist_);
+    }
     g_free(artist_);
   }
   if (error) goto errorexit;
 
   if (auto album_ = playerctl_player_get_album(player, &error)) {
-    spdlog::debug("mpris[{}]: album = {}", info.name, album_);
-    info.album = Glib::Markup::escape_text(album_);
+    if (std::string(album_).length() > 0) {
+      info.album = Glib::Markup::escape_text(album_);
+      spdlog::debug("mpris[{}]: album = {}", info.name, album_);
+    }
     g_free(album_);
   }
   if (error) goto errorexit;
 
   if (auto title_ = playerctl_player_get_title(player, &error)) {
-    spdlog::debug("mpris[{}]: title = {}", info.name, title_);
-    info.title = Glib::Markup::escape_text(title_);
+    if (std::string(title_).length() > 0) {
+      info.title = Glib::Markup::escape_text(title_);
+      spdlog::debug("mpris[{}]: title = {}", info.name, title_);
+    }
     g_free(title_);
   }
   if (error) goto errorexit;
 
   if (auto length_ = playerctl_player_print_metadata_prop(player, "mpris:length", &error)) {
-    spdlog::debug("mpris[{}]: mpris:length = {}", info.name, length_);
     std::chrono::microseconds len = std::chrono::microseconds(std::strtol(length_, nullptr, 10));
-    auto len_h = std::chrono::duration_cast<std::chrono::hours>(len);
-    auto len_m = std::chrono::duration_cast<std::chrono::minutes>(len - len_h);
-    auto len_s = std::chrono::duration_cast<std::chrono::seconds>(len - len_m);
-    if (len_h.count() > 0)
-      info.length = fmt::format("{:02}:{:02}:{:02}", len_h.count(), len_m.count(), len_s.count());
-    else
-      info.length = fmt::format("{:02}:{:02}", len_m.count(), len_s.count());
     g_free(length_);
+    if (len.count() > 0) {
+      auto len_h = std::chrono::duration_cast<std::chrono::hours>(len);
+      auto len_m = std::chrono::duration_cast<std::chrono::minutes>(len - len_h);
+      auto len_s = std::chrono::duration_cast<std::chrono::seconds>(len - len_m);
+      info.length = len_h.count() > 0 ? fmt::format("{:02}:{:02}:{:02}", len_h.count(),
+                                                    len_m.count(), len_s.count())
+                                      : fmt::format("{:02}:{:02}", len_m.count(), len_s.count());
+      spdlog::debug("mpris[{}]: mpris:length = {}", info.name, *info.length);
+    }
   }
   if (error) goto errorexit;
 
@@ -341,9 +348,15 @@ auto Mpris::update() -> void {
   // dynamic is the auto-formatted string containing a nice out-of-the-box
   // format text
   std::stringstream dynamic;
-  if (info.artist) dynamic << *info.artist << " - ";
-  if (info.album) dynamic << *info.album << " - ";
-  if (info.title) dynamic << *info.title;
+  if (info.artist) dynamic << *info.artist;
+  if (info.album)
+    if (info.artist)
+      dynamic << " - ";
+    dynamic << *info.album;
+  if (info.title)
+    if (info.artist || info.album)
+      dynamic << " - ";
+    dynamic << *info.title;
   if (info.length)
     dynamic << " "
             << "<small>"
